@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>WASM Shared Memory Clock Test</title>
+  <style>
+    body { font-family: 'Courier New', monospace; background: #1a1a1a; color: #0f0; padding: 20px; max-width: 1200px; margin: 0 auto; }
+    .status { border: 2px solid #0f0; padding: 15px; margin: 20px 0; background: #000; }
+    .tick-display { display: grid; grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap: 15px; margin: 20px 0; }
+    .precision { border: 2px solid #0f0; padding: 15px; background: #000; }
+    .precision-label { font-size: 12px; opacity: 0.7; margin-bottom: 8px; }
+    .precision-value { font-size: 32px; font-weight: bold; color: #0f0; }
+    .precision-max { font-size: 10px; opacity: 0.5; margin-top: 5px; }
+    .full-value { border: 2px solid #0f0; padding: 15px; background: #000; margin-top: 20px; }
+    .error { border-color: #f00; color: #f00; }
+    .success { border-color: #0f0; color: #0f0; }
+  </style>
+</head>
+<body>
+  <h1>⚡ WASM Mixed-Radix Clock Test</h1>
+
+  <div id="status" class="status">Initializing...</div>
+
+  <div class="tick-display">
+    <div class="precision"><div class="precision-label">P0 (micro)</div><div id="p0" class="precision-value">0</div><div class="precision-max">/ 4095</div></div>
+    <div class="precision"><div class="precision-label">P1 (sector)</div><div id="p1" class="precision-value">0</div><div class="precision-max">/ 1023</div></div>
+    <div class="precision"><div class="precision-label">P2 (zone)</div><div id="p2" class="precision-value">0</div><div class="precision-max">/ 1023</div></div>
+    <div class="precision"><div class="precision-label">P3 (region)</div><div id="p3" class="precision-value">0</div><div class="precision-max">/ 1023</div></div>
+    <div class="precision"><div class="precision-label">P4 (world)</div><div id="p4" class="precision-value">0</div><div class="precision-max">/ 1023</div></div>
+    <div class="precision"><div class="precision-label">P5 (epoch)</div><div id="p5" class="precision-value">0</div><div class="precision-max">/ 4095</div></div>
+  </div>
+
+  <div class="full-value">
+    <div style="font-size: 12px; opacity: .7; margin-bottom: 8px;">Full U64 Value:</div>
+    <div id="full" style="font-size: 20px; color: #ff0; word-break: break-all;">0x0000000000000000</div>
+  </div>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

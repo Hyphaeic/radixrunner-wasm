@@ -1,0 +1,14 @@
+[package]
+name = "radixrunner"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# Produce a plain wasm module with C ABI exports (no wasm-bindgen glue).
+crate-type = ["cdylib"]
+
+[profile.release]
+panic = "abort"
+
+[dependencies]
+# No deps required for the ticking demo

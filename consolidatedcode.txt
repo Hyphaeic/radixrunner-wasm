@@ -1,0 +1,633 @@
+
+--- /home/billy/HiR/Projects/radixrunner/tick_worker.js ---
+
+// tick_worker.js - Raw WASM instantiation for shared memory
+console.log('[Tick Worker] Worker started');
+
+self.onmessage = async (e) => {
+    if (e.data.cmd === 'init') {
+        try {
+            console.log('[Tick Worker] Received init');
+            
+            const memory = e.data.memory;
+            const wasmBytes = e.data.wasmBytes;
+            
+            console.log('[Tick Worker] Memory is SharedArrayBuffer:', memory.buffer instanceof SharedArrayBuffer);
+            console.log('[Tick Worker] Memory buffer size:', memory.buffer.byteLength);
+            
+            // Compile the WASM module
+            const wasmModule = await WebAssembly.compile(wasmBytes);
+            console.log('[Tick Worker] Module compiled');
+            
+            // Create a TextDecoder for string handling
+            const decoder = new TextDecoder('utf-8');
+            
+            // Helper to read string from WASM memory
+            function getStringFromWasm(ptr, len) {
+                const bytes = new Uint8Array(memory.buffer, ptr, len);
+                // Copy to non-shared buffer for TextDecoder
+                const copy = new Uint8Array(bytes);
+                return decoder.decode(copy);
+            }
+            
+            // Minimal imports matching what wasm-bindgen generates
+            const imports = {
+                env: {
+                    memory: memory  // THE shared memory
+                },
+                wbg: {
+                    __wbg___wbindgen_throw_b855445ff6a94295: (ptr, len) => {
+                        const msg = getStringFromWasm(ptr, len);
+                        throw new Error(msg);
+                    },
+                    __wbg_log_8cec76766b8c0e33: (arg) => {
+                        console.log('[WASM Log]', arg);
+                    },
+                    __wbindgen_cast_2241b6af4c4b2941: (ptr, len) => {
+                        return getStringFromWasm(ptr, len);
+                    },
+                    __wbindgen_init_externref_table: () => {
+                        // Initialize externref table if needed
+                        // For worker, we can skip this
+                    }
+                }
+            };
+            
+            // Instantiate with our shared memory
+            const wasmInstance = await WebAssembly.instantiate(wasmModule, imports);
+            console.log('[Tick Worker] WASM instantiated with shared memory');
+            console.log('[Tick Worker] Exports:', Object.keys(wasmInstance.exports));
+            
+            // Check if __wbindgen_start exists and call it if needed
+            if (wasmInstance.exports.__wbindgen_start) {
+                console.log('[Tick Worker] Calling __wbindgen_start');
+                wasmInstance.exports.__wbindgen_start();
+            }
+            
+            // Initialize memory base
+            wasmInstance.exports.init_memory_base();
+            console.log('[Tick Worker] Memory base initialized');
+            
+            // Verify memory is accessible from worker
+            const view = new DataView(memory.buffer);
+            const RADIX_HEAD_OFFSET = 0x100;
+            const beforeTick = view.getBigUint64(RADIX_HEAD_OFFSET, true);
+            console.log('[Tick Worker] Memory value before ticking:', '0x' + beforeTick.toString(16));
+            
+            // Signal ready
+            self.postMessage({ type: 'ready' });
+            
+            // Start tick loop (never returns)
+            console.log('[Tick Worker] Starting tick loop...');
+            wasmInstance.exports.tick_worker_main();
+            
+            console.warn('[Tick Worker] tick_worker_main returned!');
+            
+        } catch (err) {
+            console.error('[Tick Worker] Error:', err);
+            console.error('[Tick Worker] Stack:', err.stack);
+            self.postMessage({ type: 'error', error: err.message, stack: err.stack });
+        }
+    }
+};
+
+--- /home/billy/HiR/Projects/radixrunner/.gitignore ---
+
+/target
+
+
+--- /home/billy/HiR/Projects/radixrunner/main.js ---
+
+// main.js - Standalone WASM test with shared memory
+console.log('[Main] Starting standalone WASM test...');
+
+async function init() {
+    const statusEl = document.getElementById('status');
+    
+    try {
+        statusEl.textContent = 'Creating shared memory...';
+        
+        // Create shared memory - 256 pages = 16MB
+        const memory = new WebAssembly.Memory({ 
+            initial: 256, 
+            maximum: 256, 
+            shared: true 
+        });
+        
+        console.log('[Main] Shared memory created');
+        console.log('[Main] Buffer is SharedArrayBuffer:', memory.buffer instanceof SharedArrayBuffer);
+        console.log('[Main] Buffer size:', memory.buffer.byteLength);
+        
+        // Initialize memory to zero
+        const view = new DataView(memory.buffer);
+        const RADIX_HEAD_OFFSET = 0x100;
+        view.setBigUint64(RADIX_HEAD_OFFSET, 0n, true);
+        console.log('[Main] Memory initialized to 0 at offset 0x100');
+        
+        statusEl.textContent = 'Loading WASM bytes for worker...';
+        
+        // Get the WASM bytes to send to worker
+        const wasmPath = './pkg/radixrunner_bg.wasm';
+        const response = await fetch(wasmPath);
+        const wasmBytes = await response.arrayBuffer();
+        
+        console.log('[Main] WASM bytes loaded:', wasmBytes.byteLength);
+        
+        statusEl.textContent = 'Spawning tick worker...';
+        
+        // Spawn tick worker
+        const tickWorker = new Worker('./tick_worker.js', { type: 'module' });
+        
+        tickWorker.postMessage({
+            cmd: 'init',
+            memory: memory,
+            wasmBytes: wasmBytes
+        });
+        
+        tickWorker.onerror = (err) => {
+            console.error('[Main] Tick worker error:', err);
+            statusEl.textContent = 'ERROR: Tick worker failed - ' + err.message;
+            statusEl.classList.add('error');
+        };
+        
+        tickWorker.onmessage = (e) => {
+            if (e.data.type === 'error') {
+                console.error('[Main] Tick worker error:', e.data.error);
+                console.error('[Main] Stack:', e.data.stack);
+                statusEl.textContent = 'ERROR: ' + e.data.error;
+                statusEl.classList.add('error');
+            } else if (e.data.type === 'ready') {
+                console.log('[Main] Tick worker ready');
+                
+                // Check memory immediately
+                const view = new DataView(memory.buffer);
+                const immediate = view.getBigUint64(RADIX_HEAD_OFFSET, true);
+                console.log('[Main] Memory check immediately after ready:', '0x' + immediate.toString(16));
+                
+                // Wait for some ticks to accumulate
+                setTimeout(() => {
+                    const testValue = view.getBigUint64(RADIX_HEAD_OFFSET, true);
+                    console.log('[Main] Memory check after 100ms:', '0x' + testValue.toString(16));
+                    
+                    if (testValue > 0n) {
+                        console.log('[Main] ✅ Memory is being updated!');
+                        console.log('[Main] Tick rate: ~', Number(testValue) / 0.1, 'ticks/second');
+                        statusEl.textContent = '✅ WASM Runtime Active - Clock Running';
+                        statusEl.classList.remove('error');
+                        statusEl.classList.add('success');
+                        startMonitoring(memory);
+                    } else {
+                        console.error('[Main] ❌ Memory still at 0 - shared memory not working');
+                        statusEl.textContent = '❌ ERROR: Memory not shared between threads';
+                        statusEl.classList.add('error');
+                        
+                        // Additional debugging
+                        console.log('[Main] Memory buffer address:', memory.buffer);
+                        console.log('[Main] Is SharedArrayBuffer?', memory.buffer instanceof SharedArrayBuffer);
+                        console.log('[Main] Buffer byteLength:', memory.buffer.byteLength);
+                    }
+                }, 100);
+            }
+        };
+        
+    } catch (err) {
+        console.error('[Main] Initialization failed:', err);
+        console.error('[Main] Stack:', err.stack);
+        statusEl.textContent = '❌ ERROR: ' + err.message;
+        statusEl.classList.add('error');
+    }
+}
+
+function startMonitoring(memory) {
+    const RADIX_HEAD_OFFSET = 0x100;
+    
+    console.log('[Main] Starting monitor');
+    console.log('[Main] Memory buffer size:', memory.buffer.byteLength);
+    console.log('[Main] Reading from offset:', '0x' + RADIX_HEAD_OFFSET.toString(16));
+    
+    let lastValue = 0n;
+    let lastTime = performance.now();
+    
+    function update() {
+        try {
+            const view = new DataView(memory.buffer);
+            const full = view.getBigUint64(RADIX_HEAD_OFFSET, true);
+            
+            // Calculate tick rate
+            const now = performance.now();
+            const deltaTime = now - lastTime;
+            if (deltaTime > 1000) { // Update rate calculation every second
+                const deltaValue = full - lastValue;
+                const ticksPerSecond = Number(deltaValue) / (deltaTime / 1000);
+                console.log('[Main] Tick rate:', ticksPerSecond.toFixed(0), 'ticks/second');
+                lastValue = full;
+                lastTime = now;
+            }
+            
+            // Extract precision components
+            const p0 = Number(full & 0xFFFn);
+            const p1 = Number((full >> 12n) & 0x3FFn);
+            const p2 = Number((full >> 22n) & 0x3FFn);
+            const p3 = Number((full >> 32n) & 0x3FFn);
+            const p4 = Number((full >> 42n) & 0x3FFn);
+            const p5 = Number((full >> 52n) & 0xFFFn);
+            
+            // Update display
+            document.getElementById('p0').textContent = p0;
+            document.getElementById('p1').textContent = p1;
+            document.getElementById('p2').textContent = p2;
+            document.getElementById('p3').textContent = p3;
+            document.getElementById('p4').textContent = p4;
+            document.getElementById('p5').textContent = p5;
+            document.getElementById('full').textContent = '0x' + full.toString(16).padStart(16, '0');
+            
+            requestAnimationFrame(update);
+        } catch (err) {
+            console.error('[Main] Monitor error:', err);
+            requestAnimationFrame(update);
+        }
+    }
+    
+    update();
+}
+
+// Start initialization
+init();
+
+--- /home/billy/HiR/Projects/radixrunner/index.html ---
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RadixRunner - Shared Memory WASM Clock</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0a0a0a;
+            color: #00ff00;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 2px solid #00ff00;
+            background: #000;
+        }
+        
+        h1 {
+            font-size: 36px;
+            margin-bottom: 10px;
+            text-shadow: 0 0 10px #00ff00;
+        }
+        
+        .subtitle {
+            font-size: 14px;
+            opacity: 0.7;
+        }
+        
+        .status {
+            border: 2px solid #00ff00;
+            padding: 20px;
+            margin: 20px 0;
+            background: #000;
+            font-size: 18px;
+            text-align: center;
+        }
+        
+        .status.success {
+            border-color: #00ff00;
+            color: #00ff00;
+            text-shadow: 0 0 10px #00ff00;
+        }
+        
+        .status.error {
+            border-color: #ff0000;
+            color: #ff0000;
+            text-shadow: 0 0 10px #ff0000;
+        }
+        
+        .tick-display {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        
+        .precision {
+            border: 2px solid #00ff00;
+            padding: 20px;
+            background: #000;
+            text-align: center;
+        }
+        
+        .precision-label {
+            font-size: 12px;
+            opacity: 0.6;
+            margin-bottom: 10px;
+            letter-spacing: 2px;
+        }
+        
+        .precision-value {
+            font-size: 48px;
+            font-weight: bold;
+            color: #00ff00;
+            text-shadow: 0 0 20px #00ff00;
+            font-family: 'Courier New', monospace;
+            letter-spacing: 4px;
+        }
+        
+        .precision-max {
+            font-size: 10px;
+            opacity: 0.4;
+            margin-top: 8px;
+        }
+        
+        .full-value {
+            border: 2px solid #00ff00;
+            padding: 20px;
+            background: #000;
+            margin-top: 20px;
+            text-align: center;
+        }
+        
+        .full-value-label {
+            font-size: 12px;
+            opacity: 0.6;
+            margin-bottom: 10px;
+        }
+        
+        .full-value-display {
+            font-size: 24px;
+            font-weight: bold;
+            color: #00ff00;
+            letter-spacing: 2px;
+            word-break: break-all;
+        }
+        
+        .info {
+            border: 2px solid #00ff00;
+            padding: 20px;
+            background: #000;
+            margin-top: 20px;
+            font-size: 12px;
+            opacity: 0.7;
+        }
+        
+        .info h3 {
+            margin-bottom: 10px;
+            font-size: 14px;
+            color: #00ff00;
+        }
+        
+        .info ul {
+            list-style: none;
+            padding-left: 20px;
+        }
+        
+        .info li:before {
+            content: "▸ ";
+            color: #00ff00;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+        
+        .precision-value {
+            animation: pulse 2s ease-in-out infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>⚡ RADIXRUNNER ⚡</h1>
+            <div class="subtitle">Shared Memory WASM Clock - Multi-threaded Precision Time</div>
+        </header>
+        
+        <div id="status" class="status">Initializing...</div>
+        
+        <div class="tick-display">
+            <div class="precision">
+                <div class="precision-label">P0 - FINEST</div>
+                <div class="precision-value" id="p0">0</div>
+                <div class="precision-max">max: 4095</div>
+            </div>
+            
+            <div class="precision">
+                <div class="precision-label">P1</div>
+                <div class="precision-value" id="p1">0</div>
+                <div class="precision-max">max: 1023</div>
+            </div>
+            
+            <div class="precision">
+                <div class="precision-label">P2</div>
+                <div class="precision-value" id="p2">0</div>
+                <div class="precision-max">max: 1023</div>
+            </div>
+            
+            <div class="precision">
+                <div class="precision-label">P3</div>
+                <div class="precision-value" id="p3">0</div>
+                <div class="precision-max">max: 1023</div>
+            </div>
+            
+            <div class="precision">
+                <div class="precision-label">P4</div>
+                <div class="precision-value" id="p4">0</div>
+                <div class="precision-max">max: 1023</div>
+            </div>
+            
+            <div class="precision">
+                <div class="precision-label">P5 - COARSEST</div>
+                <div class="precision-value" id="p5">0</div>
+                <div class="precision-max">max: 4095</div>
+            </div>
+        </div>
+        
+        <div class="full-value">
+            <div class="full-value-label">FULL 64-BIT VALUE</div>
+            <div class="full-value-display" id="full">0x0000000000000000</div>
+        </div>
+        
+        <div class="info">
+            <h3>ARCHITECTURE</h3>
+            <ul>
+                <li>Main thread creates SharedArrayBuffer (16MB WASM memory)</li>
+                <li>Tick worker runs infinite loop with atomic increments</li>
+                <li>Main thread reads via requestAnimationFrame (60 FPS)</li>
+                <li>Zero-copy memory sharing between threads</li>
+                <li>Clock format: [P5:12][P4:10][P3:10][P2:10][P1:10][P0:12]</li>
+            </ul>
+            
+            <h3 style="margin-top: 15px;">MEMORY LAYOUT</h3>
+            <ul>
+                <li>0x0000-0x00FF: Worm head (reserved)</li>
+                <li>0x0100-0x0107: Radix head (AtomicU64) ← THE CLOCK</li>
+                <li>0x1000+: Application sections</li>
+            </ul>
+        </div>
+    </div>
+    
+    <script type="module" src="./main.js"></script>
+</body>
+</html>
+
+--- /home/billy/HiR/Projects/radixrunner/src/lib.rs ---
+
+use wasm_bindgen::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+pub mod memory_worm;
+pub mod tick_worker;
+
+// Store the base pointer as a static atomic
+static MEMORY_BASE: AtomicU64 = AtomicU64::new(0);
+
+#[wasm_bindgen]
+pub fn init_memory_base() {
+    // In WASM, memory always starts at 0
+    MEMORY_BASE.store(0, Ordering::Relaxed);
+    
+    unsafe {
+        memory_worm::MemoryWorm::init(0 as *mut u8);
+    }
+    
+    // Test tick to verify writes work
+    memory_worm::MemoryWorm::tick();
+}
+
+#[wasm_bindgen]
+pub fn tick_worker_main() {
+    // This infinite loop is fine for Web Workers
+    tick_worker::run_tick_producer();
+}
+
+#[wasm_bindgen]
+pub fn sim_worker_main() {
+    loop {
+        let p0 = memory_worm::MemoryWorm::p0();
+        let p1 = memory_worm::MemoryWorm::p1();
+        let p2 = memory_worm::MemoryWorm::p2();
+        let p3 = memory_worm::MemoryWorm::p3();
+        let p4 = memory_worm::MemoryWorm::p4();
+        let p5 = memory_worm::MemoryWorm::p5();
+        
+        if (p0 | p1 | p2 | p3 | p4 | p5) > 0 {
+            // In a real build we might write to telem area
+        }
+    }
+}
+
+// Debug function to manually check memory
+#[wasm_bindgen]
+pub fn debug_read_memory() -> u64 {
+    memory_worm::MemoryWorm::full()
+}
+
+// Debug function to manually write memory
+#[wasm_bindgen]
+pub fn debug_write_memory(value: u64) {
+    unsafe {
+        let ptr = memory_worm::MemoryWorm::radix_head() as *const AtomicU64 as *mut AtomicU64;
+        (*ptr).store(value, Ordering::Relaxed);
+    }
+}
+
+--- /home/billy/HiR/Projects/radixrunner/src/tick_worker.rs ---
+
+use crate::memory_worm::MemoryWorm;
+
+/// Run the tick producer loop
+pub fn run_tick_producer() {
+    // No console logging - JavaScript monitors the shared memory
+    
+    let mut count = 0u64;
+    loop {
+        // Single atomic increment
+        MemoryWorm::tick();
+        
+        count += 1;
+        
+        // Could add telemetry to shared memory buffer later
+        // For now, just tick as fast as possible
+    }
+}
+
+--- /home/billy/HiR/Projects/radixrunner/src/memory_worm.rs ---
+
+// src/memory_worm.rs
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// Memory layout constants
+pub const WORM_HEAD_OFFSET: usize = 0x0000;
+pub const RADIX_HEAD_OFFSET: usize = 0x0100;
+pub const APP_SECTIONS_OFFSET: usize = 0x1000;
+
+// Bit layout [P5:12][P4:10][P3:10][P2:10][P1:10][P0:12]
+pub const P0_BITS: u32 = 12; pub const P0_MASK: u64 = 0xFFF; pub const P0_SHIFT: u32 = 0;
+pub const P1_BITS: u32 = 10; pub const P1_MASK: u64 = 0x3FF; pub const P1_SHIFT: u32 = 12;
+pub const P2_BITS: u32 = 10; pub const P2_MASK: u64 = 0x3FF; pub const P2_SHIFT: u32 = 22;
+pub const P3_BITS: u32 = 10; pub const P3_MASK: u64 = 0x3FF; pub const P3_SHIFT: u32 = 32;
+pub const P4_BITS: u32 = 10; pub const P4_MASK: u64 = 0x3FF; pub const P4_SHIFT: u32 = 42;
+pub const P5_BITS: u32 = 12; pub const P5_MASK: u64 = 0xFFF; pub const P5_SHIFT: u32 = 52;
+
+// Global base pointer - raw and direct
+static mut WORM_BASE: *mut u8 = std::ptr::null_mut();
+
+pub struct MemoryWorm;
+
+impl MemoryWorm {
+    #[inline]
+    pub unsafe fn init(base: *mut u8) {
+        WORM_BASE = base;
+        
+        // Verify we can access the memory (no logging)
+        let ptr = WORM_BASE.add(RADIX_HEAD_OFFSET) as *mut AtomicU64;
+        let _initial = (*ptr).load(Ordering::Relaxed);
+        
+        // JavaScript will verify the memory is accessible
+    }
+    
+    #[inline]
+    pub fn radix_head() -> &'static AtomicU64 {
+        unsafe {
+            let ptr = WORM_BASE.add(RADIX_HEAD_OFFSET) as *mut AtomicU64;
+            &*ptr
+        }
+    }
+    
+    #[inline]
+    pub fn tick() {
+        Self::radix_head().fetch_add(1, Ordering::Relaxed);
+    }
+    
+    #[inline]
+    pub fn full() -> u64 {
+        Self::radix_head().load(Ordering::Relaxed)
+    }
+    
+    #[inline]
+    pub fn section_start(id: u32) -> *mut u8 {
+        unsafe {
+            WORM_BASE.add(APP_SECTIONS_OFFSET + (id as usize * 0x1000))
+        }
+    }
+}
