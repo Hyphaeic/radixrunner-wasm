@@ -10,6 +10,7 @@ use core::panic::PanicInfo;
 
 pub mod memory_worm;
 pub mod tick_worker;
+pub mod observer;
 
 // Optional shared state (works on both targets)
 static MEMORY_BASE: AtomicU64 = AtomicU64::new(0);
@@ -35,6 +36,12 @@ pub extern "C" fn init_memory_base() {
 #[no_mangle]
 pub extern "C" fn tick_worker_main() {
     tick_worker::run_tick_producer();
+}
+
+/// Observer worker main loop (never returns)
+#[no_mangle]
+pub extern "C" fn observer_worker_main() {
+    observer::run_observer();
 }
 
 /// Debug helpers (optional)
