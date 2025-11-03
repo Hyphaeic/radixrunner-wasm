@@ -26,9 +26,11 @@ cargo build --target wasm32-unknown-unknown --release
 TARGET_WASM="target/wasm32-unknown-unknown/release/radixrunner.wasm"
 [[ -f "$TARGET_WASM" ]] || { echo "❌ Not found: $TARGET_WASM"; exit 1; }
 
-rm -rf pkg
-mkdir -p pkg
-cp "$TARGET_WASM" "pkg/radixrunner_bg.wasm"
+OUT_DIR="public/radix-runtime/pkg"
+rm -rf "$OUT_DIR"
+mkdir -p "$OUT_DIR"
+cp "$TARGET_WASM" "$OUT_DIR/radixrunner_bg.wasm"
+echo "✓ Built: $OUT_DIR/radixrunner_bg.wasm (imports env.memory; 16 MiB shared)"
 
 ls -lh pkg
 echo "✓ Built: pkg/radixrunner_bg.wasm (imports env.memory; 16 MiB shared)"
